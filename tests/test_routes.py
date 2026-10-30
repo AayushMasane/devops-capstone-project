@@ -1,30 +1,22 @@
 """
-Account API Service Test Suite
-
-Test cases can be run with the following:
-  nosetests -v --with-spec --spec-color
-  coverage report -m
+Product API Service Test Suite
 """
 import os
 import logging
 from unittest import TestCase
-from tests.factories import AccountFactory
-from service.common import status  # HTTP Status Codes
-from service.models import db, Account, init_db
-from service.routes import app
+from urllib.parse import quote_plus
+from service import app
+from service.common import status
+from service.models import db, init_db, Product
+from tests.factories import ProductFactory
 
 DATABASE_URI = os.getenv(
     "DATABASE_URI", "postgresql://postgres:postgres@localhost:5432/postgres"
 )
+BASE_URL = "/products"
 
-BASE_URL = "/accounts"
-
-
-######################################################################
-#  T E S T   C A S E S
-######################################################################
-class TestAccountService(TestCase):
-    """Account Service Tests"""
+class TestProductRoutes(TestCase):
+    """Product Service tests"""
 
     @classmethod
     def setUpClass(cls):
@@ -37,90 +29,117 @@ class TestAccountService(TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        """Runs once before test suite"""
+        """Run once after all tests"""
+        db.session.close()
 
     def setUp(self):
-        """Runs before each test"""
-        db.session.query(Account).delete()  # clean up the last tests
+        """Run before each test"""
+        self.client = app.test_client()
+        db.session.query(Product).delete()
         db.session.commit()
 
-        self.client = app.test_client()
-
     def tearDown(self):
-        """Runs once after each test case"""
+        """Run after each test"""
         db.session.remove()
 
-    ######################################################################
-    #  H E L P E R   M E T H O D S
-    ######################################################################
-
-    def _create_accounts(self, count):
-        """Factory method to create accounts in bulk"""
-        accounts = []
+    def _create_products(self, count: int = 1) -> list:
+        """Factory method to create products in bulk"""
+        products = []
         for _ in range(count):
-            account = AccountFactory()
-            response = self.client.post(BASE_URL, json=account.serialize())
+            test_product = ProductFactory()
+            response = self.client.post(BASE_URL, json=test_product.serialize())
             self.assertEqual(
-                response.status_code,
-                status.HTTP_201_CREATED,
-                "Could not create test Account",
+                response.status_code, status.HTTP_201_CREATED, "Could not create test product"
             )
-            new_account = response.get_json()
-            account.id = new_account["id"]
-            accounts.append(account)
-        return accounts
+            new_product = response.get_json()
+            test_product.id = new_product["id"]
+            products.append(test_product)
+        return products
 
     ######################################################################
-    #  A C C O U N T   T E S T   C A S E S
+    #  T E S T   C A S E S
     ######################################################################
 
-    def test_index(self):
-        """It should get 200_OK from the Home Page"""
-        response = self.client.get("/")
+    def test_get_product(self):
+        """It should Get a single Product"""
+        test_product = self._create_products(1)[0]
+        response = self.client.get(f"{BASE_URL}/{test_product.id}")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.get_json()
+        self.assertEqual(data["name"], test_product.name)
 
-    def test_health(self):
-        """It should be healthy"""
-        resp = self.client.get("/health")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertEqual(data["status"], "OK")
-
-    def test_create_account(self):
-        """It should Create a new Account"""
-        account = AccountFactory()
+    def test_update_product(self):
+        """It should Update an existing Product"""
+        test_product = self._create_products(1)[0]
         response = self.client.post(
             BASE_URL,
-            json=account.serialize(),
-            content_type="application/json"
+            json=test_product.serialize()
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        new_product = response.get_json()
+        new_product["description"] = "unknown"
+        response = self.client.put(f"{BASE_URL}/{new_product['id']}", json=new_product)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        updated_product = response.get_json()
+        self.assertEqual(updated_product["description"], "unknown")
 
-        # Make sure location header is set
-        location = response.headers.get("Location", None)
-        self.assertIsNotNone(location)
+    def test_delete_product(self):
+        """It should Delete a Product"""
+        test_product = self._create_products(1)[0]
+        response = self.client.delete(f"{BASE_URL}/{test_product.id}")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(len(response.data), 0)
+        response = self.client.get(f"{BASE_URL}/{test_product.id}")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
-        # Check the data is correct
-        new_account = response.get_json()
-        self.assertEqual(new_account["name"], account.name)
-        self.assertEqual(new_account["email"], account.email)
-        self.assertEqual(new_account["address"], account.address)
-        self.assertEqual(new_account["phone_number"], account.phone_number)
-        self.assertEqual(new_account["date_joined"], str(account.date_joined))
+    def test_get_product_list(self):
+        """It should Get a list of Products"""
+        self._create_products(5)
+        response = self.client.get(BASE_URL)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.get_json()
+        self.assertEqual(len(data), 5)
 
-    def test_bad_request(self):
-        """It should not Create an Account when sending the wrong data"""
-        response = self.client.post(BASE_URL, json={"name": "not enough data"})
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-
-    def test_unsupported_media_type(self):
-        """It should not Create an Account when sending the wrong media type"""
-        account = AccountFactory()
-        response = self.client.post(
+    def test_query_product_list_by_name(self):
+        """It should Query Products by Name"""
+        products = self._create_products(10)
+        test_name = products[0].name
+        name_products = [product for product in products if product.name == test_name]
+        response = self.client.get(
             BASE_URL,
-            json=account.serialize(),
-            content_type="test/html"
+            query_string=f"name={quote_plus(test_name)}"
         )
-        self.assertEqual(response.status_code, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.get_json()
+        self.assertEqual(len(data), len(name_products))
+        for product in data:
+            self.assertEqual(product["name"], test_name)
 
-    # ADD YOUR TEST CASES HERE ...
+    def test_query_product_list_by_category(self):
+        """It should Query Products by Category"""
+        products = self._create_products(10)
+        category = products[0].category
+        found = [product for product in products if product.category == category]
+        response = self.client.get(
+            BASE_URL,
+            query_string=f"category={category.name}"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.get_json()
+        self.assertEqual(len(data), len(found))
+        for product in data:
+            self.assertEqual(product["category"], category.name)
+
+    def test_query_product_list_by_availability(self):
+        """It should Query Products by Availability"""
+        products = self._create_products(10)
+        available_products = [product for product in products if product.available is True]
+        response = self.client.get(
+            BASE_URL,
+            query_string="available=true"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.get_json()
+        self.assertEqual(len(data), len(available_products))
+        for product in data:
+            self.assertEqual(product["available"], True)
